@@ -12,6 +12,7 @@ WeChat Article Exporter · 公众号文章导出器
 from __future__ import annotations
 
 import argparse
+import hashlib
 import os
 import re
 import sys
@@ -80,7 +81,7 @@ def html_to_markdown(el, base_url, session, img_dir, imgs) -> str:
             lvl = int(name[1]) + 1
             out.append(f"\n{'#' * lvl} {text}\n")
         elif name == "p":
-            t = inline(node, base_url)
+            t = inline(node, base_url, session, img_dir, imgs)
             if t:
                 out.append(t + "\n")
         elif name in ("br",):
@@ -101,7 +102,7 @@ def html_to_markdown(el, base_url, session, img_dir, imgs) -> str:
             out.append("> " + inner.replace("\n", "\n> ").strip() + "\n")
         elif name in ("ul", "ol"):
             for i, li in enumerate(node.find_all("li", recursive=False), 1):
-                t = inline(li, base_url)
+                t = inline(li, base_url, session, img_dir, imgs)
                 marker = f"{i}. " if name == "ol" else "- "
                 out.append(f"{marker}{t}\n")
         elif name in ("pre", "code"):
@@ -111,14 +112,14 @@ def html_to_markdown(el, base_url, session, img_dir, imgs) -> str:
             if inner.strip():
                 out.append(inner + "\n")
         else:
-            t = inline(node, base_url)
+            t = inline(node, base_url, session, img_dir, imgs)
             if t:
                 out.append(t + "\n")
     return "\n".join(x for x in out if x is not None)
 
 
-def inline(node, base_url="") -> str:
-    """节点行内文本（保留链接/加粗/斜体）。"""
+def inline(node, base_url="", session=None, img_dir=None, imgs=None) -> str:
+    """节点行内文本（保留链接/加粗/斜体/图片）。session+img_dir 提供时图片会下载本地化。"""
     parts = []
     for c in node.children:
         if not getattr(c, "name", None):
@@ -128,7 +129,14 @@ def inline(node, base_url="") -> str:
         elif c.name == "img":
             src = c.get("data-src") or c.get("src") or ""
             if src and not src.startswith("data:"):
-                parts.append(f"![{c.get('alt','')}]({urljoin(base_url, src)})")
+                src = urljoin(base_url, src)
+                local = download_img(src, session, img_dir) if session is not None and img_dir is not None else ""
+                if local:
+                    if imgs is not None:
+                        imgs.append(src)
+                    parts.append(f"![{c.get('alt','')}]({local})")
+                else:
+                    parts.append(f"![{c.get('alt','')}]({src})")
         elif c.name == "a":
             href = c.get("href", "")
             parts.append(f"[{c.get_text(strip=True)}]({href})")
@@ -189,6 +197,8 @@ def md_html(md):
         elif ln.strip().startswith("- "):
             out.append(f"<p>{ln.strip()[2:]}</p>")
         else:
+            # 行中也可能有行内图片（inline 路径产出的 ![alt](path)）
+            ln = re.sub(r"!\[(.*?)\]\((.*?)\)", r'<img src="\2" alt="\1">', ln)
             out.append(f"<p>{ln}</p>")
     return "".join(out)
 
@@ -204,6 +214,8 @@ def export_one(url: str, out_dir: Path, session: requests.Session):
     art = parse_article(html, url)
 
     base = sanitize(f"{art['account']}_{art['title']}")
+    # 文件夹名加 8 位 URL 哈希：公众号缺账号字段/连载同名文章/重名文章不再互相覆盖；同一篇重跑仍命中原文件夹
+    base = f"{base}_{hashlib.sha1(url.encode('utf-8')).hexdigest()[:8]}"
     folder = out_dir / base
     folder.mkdir(parents=True, exist_ok=True)
     img_dir = folder / "imgs"
